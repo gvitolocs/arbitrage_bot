@@ -34,6 +34,10 @@ export interface BotConfig {
   stalePoolSeconds: number;
   requireManualConfirmation: boolean;
   unlimitedApproval: boolean;
+  sellOnlyWpkn: boolean;
+  maxWpknSellPerTx: bigint;
+  maxWpknSellPerDay: bigint;
+  geckoNetwork: string;
 }
 
 function requireAddress(name: string, value: string | undefined): string {
@@ -81,18 +85,26 @@ function parsePools(): PoolConfig[] {
   const pools: PoolConfig[] = [];
   const feeDefault = Number(process.env.POOL_FEE_BPS ?? "25");
 
-  const add = (addrEnv: string, nameEnv: string, feeEnv?: string) => {
+  const add = (
+    addrEnv: string,
+    nameEnv: string,
+    feeEnv?: string,
+    kindEnv?: string
+  ) => {
     const addr = process.env[addrEnv]?.trim();
     if (!addr) return;
+    const kindRaw = (kindEnv && process.env[kindEnv]) || "v2";
+    const kind = kindRaw.toLowerCase() === "gecko" ? "gecko" : "v2";
     pools.push({
-      address: getAddress(addr),
+      address: kind === "v2" ? getAddress(addr) : addr.toLowerCase(),
       name: process.env[nameEnv]?.trim() || addrEnv,
       feeBps: feeEnv && process.env[feeEnv] ? Number(process.env[feeEnv]) : feeDefault,
+      kind,
     });
   };
 
-  add("POOL_A_ADDRESS", "POOL_A_NAME", "POOL_A_FEE_BPS");
-  add("POOL_B_ADDRESS", "POOL_B_NAME", "POOL_B_FEE_BPS");
+  add("POOL_A_ADDRESS", "POOL_A_NAME", "POOL_A_FEE_BPS", "POOL_A_KIND");
+  add("POOL_B_ADDRESS", "POOL_B_NAME", "POOL_B_FEE_BPS", "POOL_B_KIND");
 
   if (pools.length < 1) {
     throw new Error("Configure at least one pool (POOL_A_ADDRESS)");
@@ -121,6 +133,7 @@ export function loadConfig(): BotConfig {
 
   const enableTrading = parseBool(process.env.ENABLE_TRADING, false);
   const enableAutoLiquidity = parseBool(process.env.ENABLE_AUTO_LIQUIDITY, false);
+  const sellOnlyWpkn = parseBool(process.env.SELL_ONLY_WPKN, true);
   const dryRun = parseBool(process.env.DRY_RUN, true);
 
   if ((enableTrading || enableAutoLiquidity) && dryRun) {
@@ -128,6 +141,9 @@ export function loadConfig(): BotConfig {
   }
   if ((enableTrading || enableAutoLiquidity) && !privateKey) {
     throw new Error("PRIVATE_KEY required when trading or auto-liquidity is enabled");
+  }
+  if (enableAutoLiquidity && sellOnlyWpkn) {
+    throw new Error("ENABLE_AUTO_LIQUIDITY conflicts with SELL_ONLY_WPKN");
   }
 
   const config: BotConfig = {
@@ -141,7 +157,11 @@ export function loadConfig(): BotConfig {
       "WBNB_ADDRESS",
       process.env.WBNB_ADDRESS ?? "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c"
     ),
-    routerAddress: optionalAddress("ROUTER_ADDRESS", process.env.ROUTER_ADDRESS),
+    routerAddress:
+      optionalAddress("ROUTER_ADDRESS", process.env.ROUTER_ADDRESS) ??
+      (enableTrading
+        ? getAddress("0x10ED43C718714eb63d5aA57B78B54704E256024E")
+        : undefined),
     pools: parsePools(),
     dryRun,
     enableTrading,
@@ -158,13 +178,20 @@ export function loadConfig(): BotConfig {
     maxWbnbSpendPerTx: parseTokenAmount(process.env.MAX_WBNB_SPEND_PER_TX, "0.01"),
     maxWbnbSpendPerDay: parseTokenAmount(process.env.MAX_WBNB_SPEND_PER_DAY, "0.05"),
     defaultPoolFeeBps: Number(process.env.POOL_FEE_BPS ?? "25"),
-    telegramBotToken: process.env.TELEGRAM_BOT_TOKEN?.trim() || undefined,
+    telegramBotToken:
+      process.env.TELEGRAM_BOT_TOKEN?.trim() ||
+      process.env.TELEGRAM_BOT_TOKEN_FLAREON?.trim() ||
+      undefined,
     telegramChatId: process.env.TELEGRAM_CHAT_ID?.trim() || undefined,
     databasePath: process.env.DATABASE_PATH ?? "./data/bot.sqlite",
     healthPort: Number(process.env.HEALTH_PORT ?? "8080"),
     stalePoolSeconds: Number(process.env.STALE_POOL_SECONDS ?? "3600"),
     requireManualConfirmation: parseBool(process.env.REQUIRE_MANUAL_CONFIRMATION, true),
     unlimitedApproval: parseBool(process.env.UNLIMITED_APPROVAL, false),
+    sellOnlyWpkn,
+    maxWpknSellPerTx: parseTokenAmount(process.env.MAX_WPKN_SELL_PER_TX, "5"),
+    maxWpknSellPerDay: parseTokenAmount(process.env.MAX_WPKN_SELL_PER_DAY, "50"),
+    geckoNetwork: process.env.GECKO_NETWORK ?? "bsc",
   };
 
   if (config.enableTrading && !config.routerAddress) {
@@ -180,6 +207,7 @@ export function formatConfigSummary(config: BotConfig): string {
     `dryRun=${config.dryRun}`,
     `enableTrading=${config.enableTrading}`,
     `enableAutoLiquidity=${config.enableAutoLiquidity}`,
+    `sellOnly=${config.sellOnlyWpkn}`,
     `pools=${config.pools.map((p) => p.name).join(", ")}`,
     `pollInterval=${config.pollIntervalSeconds}s`,
   ].join(" | ");

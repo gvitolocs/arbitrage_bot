@@ -2,11 +2,13 @@ import { createServer } from "node:http";
 import { loadConfig, formatConfigSummary } from "./config.js";
 import { ProviderManager } from "./blockchain/provider.js";
 import { PoolReader } from "./blockchain/contracts.js";
+import { SwapExecutor } from "./blockchain/executor.js";
 import { BotDatabase } from "./db/index.js";
 import { logStartupBanner, logger } from "./logger.js";
 import { ArbitrageSimulator } from "./services/arbitrageSimulator.js";
 import { LiquidityGuardian } from "./services/liquidityGuardian.js";
 import { PoolMonitor } from "./services/poolMonitor.js";
+import { SellRebalancer } from "./services/sellRebalancer.js";
 import { TelegramService } from "./services/telegram.js";
 import type { AlertPayload } from "./types.js";
 
@@ -23,6 +25,8 @@ async function main(): Promise<void> {
   const monitor = new PoolMonitor(config, poolReader, db);
   const arbitrage = new ArbitrageSimulator(config, providerManager, db);
   const guardian = new LiquidityGuardian(config, poolReader, providerManager, db);
+  const swapExecutor = new SwapExecutor(config, providerManager);
+  const sellRebalancer = new SellRebalancer(config, swapExecutor, db);
 
   const healthServer = createServer((req, res) => {
     if (req.url === "/health" || req.url === "/healthz") {
@@ -33,6 +37,7 @@ async function main(): Promise<void> {
           dryRun: config.dryRun,
           enableTrading: config.enableTrading,
           enableAutoLiquidity: config.enableAutoLiquidity,
+          sellOnlyWpkn: config.sellOnlyWpkn,
         })
       );
       return;
@@ -55,10 +60,15 @@ async function main(): Promise<void> {
       console.log("\n=== wPKN Liquidity Guardian — cycle ===");
       console.log(`Price difference: ${cycle.priceDiffPercent.toFixed(2)}%`);
       for (const p of cycle.prices) {
+        const px =
+          p.priceUsd != null
+            ? `$${p.priceUsd.toFixed(6)}`
+            : p.priceQuotePerWpkn.toFixed(8);
         console.log(
-          `[${p.poolName}] wPKN=${p.wpkenReserveHuman} | quote=${p.quoteReserveHuman} | price=${p.priceQuotePerWpkn.toFixed(8)} ${p.stale ? "(STALE?)" : ""}`
+          `[${p.poolName}] wPKN=${p.wpkenReserveHuman} | quote=${p.quoteReserveHuman} | price=${px} ${p.stale ? "(STALE?)" : ""}`
         );
       }
+
       if (cycle.alerts.length) {
         console.log("Alerts:", cycle.alerts.join("; "));
       } else {
@@ -76,6 +86,33 @@ async function main(): Promise<void> {
             title: "Arb opportunity (sim)",
             message: `${arb.direction}: est. ${arb.estimatedProfitQuoteHuman} quote`,
             metadata: { reason: arb.reason },
+          });
+        }
+      }
+
+      const sellPlan = sellRebalancer.plan(
+        cycle.reserves,
+        cycle.prices,
+        cycle.geckoPools
+      );
+      if (sellPlan) {
+        console.log(
+          `Sell plan: execute=${sellPlan.shouldSell} amount=${sellPlan.amountWpkn} | ${sellPlan.reason}`
+        );
+        if (sellPlan.shouldSell && config.enableTrading && !config.dryRun) {
+          const hash = await sellRebalancer.execute(sellPlan, cycle.reserves[0]!);
+          await notify(telegram, db, {
+            kind: "tx_success",
+            title: "Sold wPKN",
+            message: `tx ${hash}`,
+            poolName: sellPlan.poolName,
+          });
+        } else if (sellPlan.shouldSell) {
+          await notify(telegram, db, {
+            kind: "arbitrage_opportunity",
+            title: "Sell wPKN (dry-run)",
+            message: sellPlan.reason,
+            poolName: sellPlan.poolName,
           });
         }
       }

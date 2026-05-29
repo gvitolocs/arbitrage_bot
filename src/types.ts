@@ -1,9 +1,12 @@
 /** Shared domain types — single source of truth for cross-module contracts. */
 
+export type PoolKind = "v2" | "gecko";
+
 export interface PoolConfig {
   address: string;
   name: string;
   feeBps: number;
+  kind: PoolKind;
 }
 
 export interface TokenInfo {
@@ -31,6 +34,8 @@ export interface PoolPrice {
   poolName: string;
   /** Quote token per 1 wPKN (human-readable float for display only). */
   priceQuotePerWpkn: number;
+  /** USD per wPKN from GeckoTerminal when pool.kind=gecko. */
+  priceUsd?: number;
   /** wPKN per 1 quote (human-readable). */
   priceWpknPerQuote: number;
   wpkenReserveHuman: string;
