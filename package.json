@@ -13,9 +13,16 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "tsc --noEmit",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "add-v4-lp": "node scripts/add-v4-liquidity.mjs",
+    "debug-v4-buy": "npm run build && node scripts/debug-v4-buy.mjs",
+    "debug-v4-sell": "npm run build && node scripts/debug-v4-sell.mjs",
+    "check-v4-pool": "node scripts/check-v4-pool.mjs"
   },
   "dependencies": {
+    "@uniswap/sdk-core": "^7.16.1",
+    "@uniswap/universal-router-sdk": "^5.5.1",
+    "@uniswap/v4-sdk": "^2.2.1",
     "better-sqlite3": "^11.7.0",
     "dotenv": "^16.4.7",
     "ethers": "^6.13.4",

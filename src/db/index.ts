@@ -30,7 +30,24 @@ export class BotDatabase {
     }
     const sql = readFileSync(schemaPath, "utf8");
     this.db.exec(sql);
+    this.ensureAlertColumns();
+    this.db
+      .prepare(`INSERT OR IGNORE INTO digest_state (id, last_digest_at) VALUES (1, NULL)`)
+      .run();
     logger.info({ path: schemaPath }, "Database schema applied");
+  }
+
+  private ensureAlertColumns(): void {
+    const cols = this.db
+      .prepare(`PRAGMA table_info(alerts_sent)`)
+      .all() as { name: string }[];
+    const names = new Set(cols.map((c) => c.name));
+    if (!names.has("instant")) {
+      this.db.exec(`ALTER TABLE alerts_sent ADD COLUMN instant INTEGER NOT NULL DEFAULT 0`);
+    }
+    if (!names.has("digest_batch")) {
+      this.db.exec(`ALTER TABLE alerts_sent ADD COLUMN digest_batch TEXT`);
+    }
   }
 
   saveReserveSnapshot(reserves: PoolReserves, priceQuotePerWpkn: number): void {
@@ -58,13 +75,81 @@ export class BotDatabase {
       .run(kind, result.profitable ? 1 : 0, JSON.stringify(result));
   }
 
-  saveAlert(alert: AlertPayload): number {
+  saveAlert(alert: AlertPayload, instant = false): number {
     const info = this.db
       .prepare(
-        `INSERT INTO alerts_sent (kind, title, message, pool_name) VALUES (?, ?, ?, ?)`
+        `INSERT INTO alerts_sent (kind, title, message, pool_name, instant) VALUES (?, ?, ?, ?, ?)`
       )
-      .run(alert.kind, alert.title, alert.message, alert.poolName ?? null);
+      .run(alert.kind, alert.title, alert.message, alert.poolName ?? null, instant ? 1 : 0);
     return Number(info.lastInsertRowid);
+  }
+
+  hasRecentAlert(kind: string, message: string, withinMinutes: number): boolean {
+    const row = this.db
+      .prepare(
+        `SELECT 1 FROM alerts_sent
+         WHERE kind = ? AND message = ?
+           AND datetime(created_at) > datetime('now', ?)
+         LIMIT 1`
+      )
+      .get(kind, message, `-${withinMinutes} minutes`);
+    return row != null;
+  }
+
+  getUndigestedAlerts(): Array<{
+    id: number;
+    kind: string;
+    title: string;
+    message: string;
+    pool_name: string | null;
+    created_at: string;
+  }> {
+    return this.db
+      .prepare(
+        `SELECT id, kind, title, message, pool_name, created_at FROM alerts_sent
+         WHERE digest_batch IS NULL AND instant = 0
+         ORDER BY created_at ASC`
+      )
+      .all() as Array<{
+      id: number;
+      kind: string;
+      title: string;
+      message: string;
+      pool_name: string | null;
+      created_at: string;
+    }>;
+  }
+
+  markAlertsDigested(ids: number[], batchId: string): void {
+    if (ids.length === 0) return;
+    const stmt = this.db.prepare(`UPDATE alerts_sent SET digest_batch = ? WHERE id = ?`);
+    const tx = this.db.transaction((rows: number[]) => {
+      for (const id of rows) stmt.run(batchId, id);
+    });
+    tx(ids);
+  }
+
+  getLastDigestAt(): string | null {
+    const row = this.db
+      .prepare(`SELECT last_digest_at FROM digest_state WHERE id = 1`)
+      .get() as { last_digest_at: string | null } | undefined;
+    return row?.last_digest_at ?? null;
+  }
+
+  setLastDigestAt(iso: string): void {
+    this.db
+      .prepare(`UPDATE digest_state SET last_digest_at = ? WHERE id = 1`)
+      .run(iso);
+  }
+
+  getTransactionsSince(sinceIso: string): Array<{ kind: string; status: string; tx_hash: string | null }> {
+    return this.db
+      .prepare(
+        `SELECT kind, status, tx_hash FROM transactions
+         WHERE datetime(created_at) > datetime(?)
+         ORDER BY created_at DESC`
+      )
+      .all(sinceIso) as Array<{ kind: string; status: string; tx_hash: string | null }>;
   }
 
   recordTransaction(

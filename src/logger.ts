@@ -24,7 +24,9 @@ export const logger = pino({
 
 export function logStartupBanner(configSummary: string): void {
   logger.info({ config: configSummary }, "wPKN Liquidity Guardian starting");
-  logger.warn(
-    "DRY_RUN mode: no transactions will be sent unless ENABLE_TRADING/ENABLE_AUTO_LIQUIDITY and DRY_RUN=false"
-  );
+  if (configSummary.includes("dryRun=true")) {
+    logger.warn(
+      "DRY_RUN mode: no transactions will be sent unless ENABLE_TRADING/ENABLE_AUTO_LIQUIDITY and DRY_RUN=false"
+    );
+  }
 }

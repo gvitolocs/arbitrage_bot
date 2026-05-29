@@ -5,6 +5,7 @@ import { ProviderManager } from "../blockchain/provider.js";
 import { calculateLiquidityAmounts, formatUnits } from "../dex/uniswapV2Math.js";
 import type { BotDatabase } from "../db/index.js";
 import type { LiquidityRefillPlan, PoolReserves } from "../types.js";
+import type { GeckoPoolSnapshot } from "./geckoTerminal.js";
 import { logger } from "../logger.js";
 
 const ESTIMATED_ADD_LIQ_GAS = 350_000n;
@@ -17,7 +18,10 @@ export class LiquidityGuardian {
     private readonly db: BotDatabase
   ) {}
 
-  async planRefills(reserves: PoolReserves[]): Promise<LiquidityRefillPlan[]> {
+  async planRefills(
+    reserves: PoolReserves[],
+    geckoPools: GeckoPoolSnapshot[] = []
+  ): Promise<LiquidityRefillPlan[]> {
     const plans: LiquidityRefillPlan[] = [];
     const today = new Date().toISOString().slice(0, 10);
     const daily = this.db.getDailyUsage(today);
@@ -90,6 +94,29 @@ export class LiquidityGuardian {
           canExecute: plan.canExecute,
         },
         "Liquidity refill suggestion"
+      );
+    }
+
+    for (const g of geckoPools) {
+      const w = g.wpkenReserveEstimate;
+      if (!w || w >= this.config.minWpkenReservePerPool) continue;
+
+      const wpkenToAdd = this.config.minWpkenReservePerPool - w;
+      plans.push({
+        poolAddress: g.poolAddress,
+        poolName: g.name,
+        currentWpknReserve: w,
+        targetWpknReserve: this.config.minWpkenReservePerPool,
+        wpkenToAdd,
+        quoteToAdd: 0n,
+        estimatedGas: ESTIMATED_ADD_LIQ_GAS,
+        canExecute: false,
+        blockReason:
+          "Uniswap v4 below min wPKN — add liquidity manually (auto-liquidity not supported on v4)",
+      });
+      logger.warn(
+        { pool: g.name, wpkn: formatUnits(w, 18), wpkenToAdd: formatUnits(wpkenToAdd, 18) },
+        "Uniswap v4 low wPKN reserve"
       );
     }
 

@@ -10,6 +10,8 @@ import { LiquidityGuardian } from "./services/liquidityGuardian.js";
 import { PoolMonitor } from "./services/poolMonitor.js";
 import { SellRebalancer } from "./services/sellRebalancer.js";
 import { HermesNotifyService } from "./services/hermesNotify.js";
+import { DailyDigestService } from "./services/dailyDigest.js";
+import { recordAlert } from "./services/alertJournal.js";
 import type { AlertPayload } from "./types.js";
 
 let shuttingDown = false;
@@ -22,11 +24,18 @@ async function main(): Promise<void> {
   const providerManager = new ProviderManager(config);
   const poolReader = new PoolReader(providerManager, config);
   const notifyService = new HermesNotifyService(config);
-  const monitor = new PoolMonitor(config, poolReader, db);
+  const dailyDigest = new DailyDigestService(config, db, notifyService);
+  const monitor = new PoolMonitor(config, poolReader, providerManager, db);
   const arbitrage = new ArbitrageSimulator(config, providerManager, db);
   const guardian = new LiquidityGuardian(config, poolReader, providerManager, db);
   const swapExecutor = new SwapExecutor(config, providerManager);
-  const sellRebalancer = new SellRebalancer(config, poolReader, swapExecutor, db);
+  const sellRebalancer = new SellRebalancer(
+    config,
+    poolReader,
+    providerManager,
+    swapExecutor,
+    db
+  );
 
   const healthServer = createServer((req, res) => {
     if (req.url === "/health" || req.url === "/healthz") {
@@ -36,9 +45,7 @@ async function main(): Promise<void> {
           status: shuttingDown ? "shutting_down" : "ok",
           dryRun: config.dryRun,
           enableTrading: config.enableTrading,
-          enableAutoLiquidity: config.enableAutoLiquidity,
-          sellOnlyWpkn: config.sellOnlyWpkn,
-          mevProtectTx: config.mevProtectTx,
+          watchMode: "daily_digest",
         })
       );
       return;
@@ -50,97 +57,106 @@ async function main(): Promise<void> {
     logger.info({ port: config.healthPort }, "Health server listening");
   });
 
-  await notifyService.sendStartupReport(formatConfigSummary(config));
+  journal(notifyService, db, {
+    kind: "startup",
+    title: "Guardian online",
+    message: formatConfigSummary(config),
+  });
 
   const runTick = async (): Promise<void> => {
     if (shuttingDown) return;
 
     try {
+      await dailyDigest.maybeRun();
+
       const cycle = await monitor.runCycle();
 
-      console.log("\n=== wPKN Liquidity Guardian — cycle ===");
-      console.log(`Price difference: ${cycle.priceDiffPercent.toFixed(2)}%`);
+      console.log("\n=== wPKN Guardian — cycle ===");
+      const gapLabel = cycle.priceGapActionable
+        ? `${cycle.priceDiffPercent.toFixed(2)}% — rebalance toward ≤${config.targetPriceDiffPercent}%`
+        : `${cycle.priceDiffPercent.toFixed(2)}% — within target`;
+      console.log(`Price difference: ${gapLabel}`);
       for (const p of cycle.prices) {
+        const geckoSpot = (p as { geckoPriceUsd?: number }).geckoPriceUsd;
         const px =
           p.priceUsd != null
             ? `$${p.priceUsd.toFixed(6)}`
             : p.priceQuotePerWpkn.toFixed(8);
+        const geckoNote =
+          geckoSpot != null && p.priceUsd != null && Math.abs(geckoSpot - p.priceUsd) > 0.0001
+            ? ` | gecko-spot=$${geckoSpot.toFixed(4)} (index only)`
+            : "";
         console.log(
-          `[${p.poolName}] wPKN=${p.wpkenReserveHuman} | quote=${p.quoteReserveHuman} | price=${px} ${p.stale ? "(STALE?)" : ""}`
+          `[${p.poolName}] wPKN=${p.wpkenReserveHuman} | quote=${p.quoteReserveHuman} | price=${px}${geckoNote}`
         );
       }
-
       if (cycle.alerts.length) {
-        console.log("Alerts:", cycle.alerts.join("; "));
-      } else {
-        console.log("Alerts: none");
+        console.log("Alerts (logged, not pinged):", cycle.alerts.join("; "));
       }
 
       const arb = await arbitrage.simulate(cycle.reserves);
-      if (arb) {
-        console.log(
-          `Arbitrage sim: profitable=${arb.profitable} dir=${arb.direction} net=${arb.estimatedProfitQuoteHuman} | ${arb.reason}`
-        );
-        if (arb.profitable) {
-          await notify(notifyService, db, {
-            kind: "arbitrage_opportunity",
-            title: "Arb opportunity (sim)",
-            message: `${arb.direction}: est. ${arb.estimatedProfitQuoteHuman} quote`,
-            metadata: { reason: arb.reason },
-          });
-        }
+      if (arb?.profitable) {
+        journal(notifyService, db, {
+          kind: "arbitrage_opportunity",
+          title: "Arb sim",
+          message: `${arb.direction}: ${arb.estimatedProfitQuoteHuman}`,
+          metadata: { reason: arb.reason },
+        });
       }
 
-      const sellPlan = sellRebalancer.plan(
+      const sellPlan = await sellRebalancer.plan(
         cycle.reserves,
         cycle.prices,
         cycle.geckoPools
       );
       if (sellPlan) {
-        console.log(
-          `Sell plan: execute=${sellPlan.shouldSell} amount=${sellPlan.amountWpkn} | ${sellPlan.reason}`
-        );
+        console.log(`Sell plan [${sellPlan.venue}]: ${sellPlan.reason}`);
         if (sellPlan.shouldSell && config.enableTrading && !config.dryRun) {
-          const hash = await sellRebalancer.execute(sellPlan, cycle.reserves[0]!);
-          await notify(notifyService, db, {
-            kind: "tx_success",
-            title: "Sold wPKN",
-            message: `tx ${hash}`,
-            poolName: sellPlan.poolName,
-          });
+          try {
+            const hash = await sellRebalancer.execute(sellPlan, cycle.reserves[0]!);
+            await journal(notifyService, db, {
+              kind: "tx_success",
+              title: "Sold wPKN",
+              message: `tx ${hash}`,
+              poolName: sellPlan.poolName,
+            });
+          } catch (err) {
+            await journal(notifyService, db, {
+              kind: "tx_failed",
+              title: "Sell failed",
+              message: err instanceof Error ? err.message : String(err),
+              poolName: sellPlan.poolName,
+            });
+          }
         } else if (sellPlan.shouldSell) {
-          await notify(notifyService, db, {
+          journal(notifyService, db, {
             kind: "arbitrage_opportunity",
-            title: "Sell wPKN (dry-run)",
+            title: "Would sell wPKN",
             message: sellPlan.reason,
             poolName: sellPlan.poolName,
           });
         }
       }
 
-      const plans = await guardian.planRefills(cycle.reserves);
-      for (const plan of plans) {
-        console.log(
-          `Refill ${plan.poolName}: +${plan.wpkenToAdd} wPKN + quote | execute=${plan.canExecute} ${plan.blockReason ?? ""}`
-        );
-        await notify(notifyService, db, {
+      for (const plan of await guardian.planRefills(cycle.reserves, cycle.geckoPools)) {
+        journal(notifyService, db, {
           kind: "liquidity_refill_suggestion",
-          title: "Low wPKN reserve",
-          message: `Add ~${plan.wpkenToAdd} wPKN. ${plan.blockReason ?? "Ready (still disabled until enabled)"}`,
+          title: "Low reserve plan",
+          message: plan.blockReason ?? "refill planned",
           poolName: plan.poolName,
         });
       }
 
       for (const alert of cycle.alerts) {
         if (alert.includes("Price diff")) {
-          await notify(notifyService, db, {
+          journal(notifyService, db, {
             kind: "price_divergence",
             title: "Price divergence",
             message: alert,
           });
         }
         if (alert.includes("below min")) {
-          await notify(notifyService, db, {
+          journal(notifyService, db, {
             kind: "low_reserve",
             title: "Low reserve",
             message: alert,
@@ -151,7 +167,7 @@ async function main(): Promise<void> {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       logger.error({ err: msg }, "Monitor cycle failed");
-      await notify(notifyService, db, {
+      journal(notifyService, db, {
         kind: "rpc_failure",
         title: "Cycle error",
         message: msg,
@@ -165,7 +181,6 @@ async function main(): Promise<void> {
   const shutdown = (): void => {
     if (shuttingDown) return;
     shuttingDown = true;
-    logger.info("Shutting down gracefully");
     clearInterval(interval);
     healthServer.close();
     db.close();
@@ -176,13 +191,15 @@ async function main(): Promise<void> {
   process.on("SIGTERM", shutdown);
 }
 
-async function notify(
+function journal(
   hermes: HermesNotifyService,
   db: BotDatabase,
   alert: AlertPayload
-): Promise<void> {
-  db.saveAlert(alert);
-  await hermes.send(alert);
+): void {
+  const { saved, instant } = recordAlert(db, alert);
+  if (saved && instant) {
+    void hermes.send(alert);
+  }
 }
 
 main().catch((err) => {

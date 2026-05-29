@@ -2,39 +2,51 @@ import type { BotConfig } from "../config.js";
 import type { AlertPayload } from "../types.js";
 import { logger } from "../logger.js";
 
-/** Deliver alerts via Hermes Flareon on nespc (not a separate Telegram bot client). */
+export interface DigestPayload {
+  periodStart: string;
+  periodEnd: string;
+  alerts: Array<{
+    kind: string;
+    title: string;
+    message: string;
+    poolName?: string;
+    at: string;
+  }>;
+  transactions: Array<{ kind: string; status: string; tx_hash: string | null }>;
+  stats: { alertCount: number; txCount: number; kinds: Record<string, number> };
+}
+
+/** Deliver via Hermes Flareon — instant alerts rare; daily digest is the default. */
 export class HermesNotifyService {
   private readonly enabled: boolean;
 
   constructor(private readonly config: BotConfig) {
     this.enabled = Boolean(config.hermesAlertUrl && config.hermesAlertToken);
-    if (!this.enabled) {
-      logger.warn(
-        "Hermes alerts disabled — set HERMES_ALERT_URL and HERMES_ALERT_TOKEN (Flareon on nespc)"
-      );
-    }
   }
 
   isEnabled(): boolean {
     return this.enabled;
   }
 
-  async send(alert: AlertPayload): Promise<boolean> {
-    const text = [alert.title, alert.message, alert.poolName ? `Pool: ${alert.poolName}` : ""]
-      .filter(Boolean)
-      .join(" | ");
-    logger.info({ kind: alert.kind, title: alert.title }, text);
+  private headers(): Record<string, string> {
+    return {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${this.config.hermesAlertToken}`,
+    };
+  }
 
+  private baseUrl(): string {
+    return this.config.hermesAlertUrl!.replace(/\/+$/, "");
+  }
+
+  async send(alert: AlertPayload): Promise<boolean> {
+    logger.info({ kind: alert.kind, title: alert.title }, "Instant alert → Flareon");
     if (!this.enabled) return false;
 
-    const url = `${this.config.hermesAlertUrl!.replace(/\/+$/, "")}/api/internal/guardian/alert`;
     try {
-      const res = await fetch(url, {
+      const res = await fetch(`${this.baseUrl()}/api/internal/guardian/alert`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${this.config.hermesAlertToken}`,
-        },
+        headers: this.headers(),
         body: JSON.stringify({
           kind: alert.kind,
           title: alert.title,
@@ -44,22 +56,39 @@ export class HermesNotifyService {
         }),
       });
       if (!res.ok) {
-        const body = await res.text();
-        logger.error({ status: res.status, body }, "Hermes guardian alert failed");
+        logger.error({ status: res.status }, "Instant alert failed");
         return false;
       }
       return true;
     } catch (err) {
-      logger.error({ err }, "Hermes guardian alert request failed");
+      logger.error({ err }, "Instant alert request failed");
       return false;
     }
   }
 
-  async sendStartupReport(summary: string): Promise<void> {
-    await this.send({
-      kind: "startup",
-      title: "wPKN Guardian started",
-      message: summary,
-    });
+  async sendDigest(payload: DigestPayload): Promise<boolean> {
+    if (!this.enabled) return false;
+
+    try {
+      const res = await fetch(`${this.baseUrl()}/api/internal/guardian/digest`, {
+        method: "POST",
+        headers: this.headers(),
+        body: JSON.stringify(payload),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        logger.error({ status: res.status, body }, "Daily digest failed");
+        return false;
+      }
+      if ((body as { skipped?: boolean }).skipped) {
+        logger.info("Flareon digest skipped (nothing meaningful)");
+        return true;
+      }
+      logger.info("Daily digest sent via Flareon");
+      return true;
+    } catch (err) {
+      logger.error({ err }, "Daily digest request failed");
+      return false;
+    }
   }
 }

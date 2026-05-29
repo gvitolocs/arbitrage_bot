@@ -28,7 +28,16 @@ CREATE TABLE IF NOT EXISTS alerts_sent (
   title TEXT NOT NULL,
   message TEXT NOT NULL,
   pool_name TEXT,
+  instant INTEGER NOT NULL DEFAULT 0,
+  digest_batch TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_alerts_kind_time ON alerts_sent(kind, created_at);
+
+CREATE TABLE IF NOT EXISTS digest_state (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  last_digest_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS transactions (

@@ -22,6 +22,10 @@ export interface BotConfig {
   enableAutoLiquidity: boolean;
   minWpkenReservePerPool: bigint;
   priceDiffAlertPercent: number;
+  /** Stop rebalancing once cross-pool gap is at or below this (price alignment target). */
+  targetPriceDiffPercent: number;
+  /** Below this USD, Gecko v4 spot is ignored — use on-chain slot0 vs Pancake instead. */
+  minV4GeckoTrustReserveUsd: number;
   arbitrageMinProfitBnb: number;
   maxSlippageBps: number;
   maxGasPriceGwei: number;
@@ -43,6 +47,13 @@ export interface BotConfig {
   maxWpknSellPerTx: bigint;
   maxWpknSellPerDay: bigint;
   geckoNetwork: string;
+  digestUtcHour: number;
+  uniswapUniversalRouter: string | undefined;
+  uniswapStateView: string | undefined;
+  minV4PoolReserveUsd: number;
+  /** wPKN per Uniswap sell when v4 reserve USD is very low (price alignment). */
+  v4SellWpknThinPool: bigint;
+  bnbUsdFallback: number;
 }
 
 function requireAddress(name: string, value: string | undefined): string {
@@ -107,7 +118,9 @@ function parsePools(): PoolConfig[] {
     const addr = process.env[addrEnv]?.trim();
     if (!addr) return;
     const kindRaw = (kindEnv && process.env[kindEnv]) || "v2";
-    const kind = kindRaw.toLowerCase() === "gecko" ? "gecko" : "v2";
+    const k = kindRaw.toLowerCase();
+    const kind: PoolConfig["kind"] =
+      k === "gecko" || k === "v4" ? k : "v2";
     pools.push({
       address: kind === "v2" ? getAddress(addr) : addr.toLowerCase(),
       name: process.env[nameEnv]?.trim() || addrEnv,
@@ -204,7 +217,11 @@ export function loadConfig(): BotConfig {
     enableTrading,
     enableAutoLiquidity,
     minWpkenReservePerPool: parseTokenAmount(process.env.MIN_WPKN_RESERVE_PER_POOL, "50"),
-    priceDiffAlertPercent: Number(process.env.PRICE_DIFF_ALERT_PERCENT ?? "10"),
+    priceDiffAlertPercent: Number(process.env.PRICE_DIFF_ALERT_PERCENT ?? "2"),
+    targetPriceDiffPercent: Number(
+      process.env.TARGET_PRICE_DIFF_PERCENT ?? process.env.MAX_PRICE_DIFF_PERCENT ?? "10"
+    ),
+    minV4GeckoTrustReserveUsd: Number(process.env.MIN_V4_GECKO_TRUST_RESERVE_USD ?? "100"),
     arbitrageMinProfitBnb: Number(process.env.ARBITRAGE_MIN_PROFIT_BNB ?? "0.001"),
     maxSlippageBps: Number(process.env.MAX_SLIPPAGE_BPS ?? "100"),
     maxGasPriceGwei: Number(process.env.MAX_GAS_PRICE_GWEI ?? "3"),
@@ -229,6 +246,19 @@ export function loadConfig(): BotConfig {
     maxWpknSellPerTx: parseTokenAmount(process.env.MAX_WPKN_SELL_PER_TX, "5"),
     maxWpknSellPerDay: parseTokenAmount(process.env.MAX_WPKN_SELL_PER_DAY, "50"),
     geckoNetwork: process.env.GECKO_NETWORK ?? "bsc",
+    digestUtcHour: Number(process.env.DIGEST_UTC_HOUR ?? "9"),
+    uniswapUniversalRouter: optionalAddress(
+      "UNISWAP_UNIVERSAL_ROUTER",
+      process.env.UNISWAP_UNIVERSAL_ROUTER ??
+        "0x8B844f885672f333Bc0042cB669255f93a4C1E6b"
+    ),
+    uniswapStateView: optionalAddress(
+      "UNISWAP_STATE_VIEW",
+      process.env.UNISWAP_STATE_VIEW ?? "0xd13dd3d6e93f276fafc9db9e6bb47c1180aee0c4"
+    ),
+    minV4PoolReserveUsd: Number(process.env.MIN_V4_POOL_RESERVE_USD ?? "25"),
+    v4SellWpknThinPool: parseTokenAmount(process.env.V4_SELL_WPKN_THIN_POOL, "1"),
+    bnbUsdFallback: Number(process.env.BNB_USD_FALLBACK ?? "630"),
   };
 
   if (config.enableTrading && !config.routerAddress) {
@@ -248,6 +278,7 @@ export function formatConfigSummary(config: BotConfig): string {
     `mevTx=${config.mevProtectTx}`,
     `txRpcs=${config.txRpcUrls.length}`,
     `pools=${config.pools.map((p) => p.name).join(", ")}`,
+    `uniswapRouter=${config.uniswapUniversalRouter ? "yes" : "no"}`,
     `pollInterval=${config.pollIntervalSeconds}s`,
   ].join(" | ");
 }

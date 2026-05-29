@@ -1,6 +1,6 @@
 /** Shared domain types — single source of truth for cross-module contracts. */
 
-export type PoolKind = "v2" | "gecko";
+export type PoolKind = "v2" | "gecko" | "v4";
 
 export interface PoolConfig {
   address: string;
@@ -42,6 +42,8 @@ export interface PoolPrice {
   quoteReserveHuman: string;
   stale: boolean;
   suspiciousChange: boolean;
+  /** On-chain or estimated wPKN in pool (v4 uses Gecko USD estimate). */
+  wpkenReserve?: bigint;
 }
 
 export interface ArbitrageSimulationResult {
