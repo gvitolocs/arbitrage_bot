@@ -8,12 +8,12 @@ services:
     image: wpkn-liquidity-guardian:latest
     container_name: wpkn-guardian
     restart: unless-stopped
+    # Reach Hermes SSH tunnel on host (127.0.0.1:18788 → nespc Flareon)
+    network_mode: host
     env_file:
       - .env
     volumes:
       - guardian-data:/app/data
-    ports:
-      - "${HEALTH_PORT:-8080}:8080"
     deploy:
       resources:
         limits:
@@ -27,7 +27,7 @@ services:
         max-size: "10m"
         max-file: "3"
     healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:'+(process.env.HEALTH_PORT||8080)+'/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 60s
       timeout: 5s
       retries: 3

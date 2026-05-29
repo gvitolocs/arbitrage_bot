@@ -9,7 +9,7 @@ import { ArbitrageSimulator } from "./services/arbitrageSimulator.js";
 import { LiquidityGuardian } from "./services/liquidityGuardian.js";
 import { PoolMonitor } from "./services/poolMonitor.js";
 import { SellRebalancer } from "./services/sellRebalancer.js";
-import { TelegramService } from "./services/telegram.js";
+import { HermesNotifyService } from "./services/hermesNotify.js";
 import type { AlertPayload } from "./types.js";
 
 let shuttingDown = false;
@@ -21,7 +21,7 @@ async function main(): Promise<void> {
   const db = new BotDatabase(config.databasePath);
   const providerManager = new ProviderManager(config);
   const poolReader = new PoolReader(providerManager, config);
-  const telegram = new TelegramService(config);
+  const notifyService = new HermesNotifyService(config);
   const monitor = new PoolMonitor(config, poolReader, db);
   const arbitrage = new ArbitrageSimulator(config, providerManager, db);
   const guardian = new LiquidityGuardian(config, poolReader, providerManager, db);
@@ -50,7 +50,7 @@ async function main(): Promise<void> {
     logger.info({ port: config.healthPort }, "Health server listening");
   });
 
-  await telegram.sendStartupReport(formatConfigSummary(config));
+  await notifyService.sendStartupReport(formatConfigSummary(config));
 
   const runTick = async (): Promise<void> => {
     if (shuttingDown) return;
@@ -82,7 +82,7 @@ async function main(): Promise<void> {
           `Arbitrage sim: profitable=${arb.profitable} dir=${arb.direction} net=${arb.estimatedProfitQuoteHuman} | ${arb.reason}`
         );
         if (arb.profitable) {
-          await notify(telegram, db, {
+          await notify(notifyService, db, {
             kind: "arbitrage_opportunity",
             title: "Arb opportunity (sim)",
             message: `${arb.direction}: est. ${arb.estimatedProfitQuoteHuman} quote`,
@@ -102,14 +102,14 @@ async function main(): Promise<void> {
         );
         if (sellPlan.shouldSell && config.enableTrading && !config.dryRun) {
           const hash = await sellRebalancer.execute(sellPlan, cycle.reserves[0]!);
-          await notify(telegram, db, {
+          await notify(notifyService, db, {
             kind: "tx_success",
             title: "Sold wPKN",
             message: `tx ${hash}`,
             poolName: sellPlan.poolName,
           });
         } else if (sellPlan.shouldSell) {
-          await notify(telegram, db, {
+          await notify(notifyService, db, {
             kind: "arbitrage_opportunity",
             title: "Sell wPKN (dry-run)",
             message: sellPlan.reason,
@@ -123,7 +123,7 @@ async function main(): Promise<void> {
         console.log(
           `Refill ${plan.poolName}: +${plan.wpkenToAdd} wPKN + quote | execute=${plan.canExecute} ${plan.blockReason ?? ""}`
         );
-        await notify(telegram, db, {
+        await notify(notifyService, db, {
           kind: "liquidity_refill_suggestion",
           title: "Low wPKN reserve",
           message: `Add ~${plan.wpkenToAdd} wPKN. ${plan.blockReason ?? "Ready (still disabled until enabled)"}`,
@@ -133,14 +133,14 @@ async function main(): Promise<void> {
 
       for (const alert of cycle.alerts) {
         if (alert.includes("Price diff")) {
-          await notify(telegram, db, {
+          await notify(notifyService, db, {
             kind: "price_divergence",
             title: "Price divergence",
             message: alert,
           });
         }
         if (alert.includes("below min")) {
-          await notify(telegram, db, {
+          await notify(notifyService, db, {
             kind: "low_reserve",
             title: "Low reserve",
             message: alert,
@@ -151,7 +151,7 @@ async function main(): Promise<void> {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       logger.error({ err: msg }, "Monitor cycle failed");
-      await notify(telegram, db, {
+      await notify(notifyService, db, {
         kind: "rpc_failure",
         title: "Cycle error",
         message: msg,
@@ -177,12 +177,12 @@ async function main(): Promise<void> {
 }
 
 async function notify(
-  telegram: TelegramService,
+  hermes: HermesNotifyService,
   db: BotDatabase,
   alert: AlertPayload
 ): Promise<void> {
   db.saveAlert(alert);
-  await telegram.send(alert);
+  await hermes.send(alert);
 }
 
 main().catch((err) => {

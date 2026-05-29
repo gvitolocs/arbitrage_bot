@@ -32,8 +32,8 @@ export interface BotConfig {
   maxWbnbSpendPerTx: bigint;
   maxWbnbSpendPerDay: bigint;
   defaultPoolFeeBps: number;
-  telegramBotToken: string | undefined;
-  telegramChatId: string | undefined;
+  hermesAlertUrl: string | undefined;
+  hermesAlertToken: string | undefined;
   databasePath: string;
   healthPort: number;
   stalePoolSeconds: number;
@@ -215,11 +215,11 @@ export function loadConfig(): BotConfig {
     maxWbnbSpendPerTx: parseTokenAmount(process.env.MAX_WBNB_SPEND_PER_TX, "0.01"),
     maxWbnbSpendPerDay: parseTokenAmount(process.env.MAX_WBNB_SPEND_PER_DAY, "0.05"),
     defaultPoolFeeBps: Number(process.env.POOL_FEE_BPS ?? "25"),
-    telegramBotToken:
-      process.env.TELEGRAM_BOT_TOKEN?.trim() ||
-      process.env.TELEGRAM_BOT_TOKEN_FLAREON?.trim() ||
+    hermesAlertUrl: process.env.HERMES_ALERT_URL?.trim() || undefined,
+    hermesAlertToken:
+      process.env.HERMES_ALERT_TOKEN?.trim() ||
+      process.env.BOT_HOSPITAL_TOKEN?.trim() ||
       undefined,
-    telegramChatId: process.env.TELEGRAM_CHAT_ID?.trim() || undefined,
     databasePath: process.env.DATABASE_PATH ?? "./data/bot.sqlite",
     healthPort: Number(process.env.HEALTH_PORT ?? "8080"),
     stalePoolSeconds: Number(process.env.STALE_POOL_SECONDS ?? "3600"),
