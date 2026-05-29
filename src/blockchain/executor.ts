@@ -1,13 +1,9 @@
-import {
-  Contract,
-  Wallet,
-  parseUnits,
-  type JsonRpcProvider,
-} from "ethers";
+import { Contract, Wallet, type JsonRpcProvider } from "ethers";
 import { ERC20_ABI, UNISWAP_V2_ROUTER_ABI } from "../abis/index.js";
 import type { BotConfig } from "../config.js";
 import { fetchGasSnapshot, maxGasPriceWei } from "./gas.js";
 import { applySlippageMin, getAmountOut } from "../dex/uniswapV2Math.js";
+import { applyTxJitter } from "./mev.js";
 import { logger } from "../logger.js";
 import type { ProviderManager } from "./provider.js";
 
@@ -60,32 +56,50 @@ export class SwapExecutor {
       throw new Error(`Cooldown: wait ${this.config.minSecondsBetweenActions - elapsed}s`);
     }
 
-    return this.providerManager.withFallback(async (provider) => {
-      const gas = await fetchGasSnapshot(provider, this.config);
-      if (!gas.withinLimit) {
-        throw new Error(`Gas ${gas.gasPriceGwei} gwei > max ${this.config.maxGasPriceGwei}`);
-      }
-      if (gas.gasPriceWei > maxGasPriceWei(this.config)) {
-        throw new Error("Gas price above cap");
-      }
+    await applyTxJitter(this.config.txJitterMs);
 
-      const signer = await this.getSigner(provider);
-      const path = [this.config.wpkenAddress, params.quoteTokenAddress];
-      const expectedOut = getAmountOut(
-        params.amountWpkn,
-        params.reserveWpkn,
-        params.reserveQuote,
-        params.feeBps
-      );
-      const amountOutMin = applySlippageMin(expectedOut, this.config.maxSlippageBps);
-      const deadline = Math.floor(Date.now() / 1000) + 300;
+    const gas = await this.providerManager.withReadFallback((p) =>
+      fetchGasSnapshot(p, this.config)
+    );
+    if (!gas.withinLimit || gas.gasPriceWei > maxGasPriceWei(this.config)) {
+      throw new Error(`Gas ${gas.gasPriceGwei.toFixed(2)} gwei above cap`);
+    }
 
+    const path = [this.config.wpkenAddress, params.quoteTokenAddress];
+    const expectedOut = getAmountOut(
+      params.amountWpkn,
+      params.reserveWpkn,
+      params.reserveQuote,
+      params.feeBps
+    );
+    const amountOutMin = applySlippageMin(expectedOut, this.config.maxSlippageBps);
+    const deadline = Math.floor(Date.now() / 1000) + 120;
+
+    return this.providerManager.withTxFallback(async (txProvider) => {
+      const signer = await this.getSigner(txProvider);
       const wpken = new Contract(this.config.wpkenAddress, ERC20_ABI, signer);
       const router = new Contract(
         this.config.routerAddress!,
         UNISWAP_V2_ROUTER_ABI,
         signer
       );
+
+      const swapArgs = [
+        params.amountWpkn,
+        amountOutMin,
+        path,
+        signer.address,
+        deadline,
+      ] as const;
+
+      try {
+        await router.swapExactTokensForTokens.staticCall(...swapArgs);
+        logger.info("Preflight staticCall OK (private RPC)");
+      } catch (err) {
+        throw new Error(
+          `Preflight simulation failed: ${err instanceof Error ? err.message : String(err)}`
+        );
+      }
 
       const allowance = (await wpken.allowance(
         signer.address,
@@ -96,26 +110,31 @@ export class SwapExecutor {
         const approveAmount = this.config.unlimitedApproval
           ? 2n ** 256n - 1n
           : params.amountWpkn;
-        logger.info({ amount: approveAmount.toString() }, "Approving router for wPKN");
-        const txA = await wpken.approve(this.config.routerAddress!, approveAmount);
+        logger.info({ amount: approveAmount.toString() }, "Approving router (private RPC)");
+        const txA = await wpken.approve(this.config.routerAddress!, approveAmount, {
+          gasPrice: gas.gasPriceWei,
+        });
         await txA.wait();
       }
+
+      const gasEstimate = await router.swapExactTokensForTokens.estimateGas(...swapArgs, {
+        gasPrice: gas.gasPriceWei,
+      });
 
       logger.info(
         {
           amountWpkn: params.amountWpkn.toString(),
           amountOutMin: amountOutMin.toString(),
+          gasEstimate: gasEstimate.toString(),
+          mevProtect: this.config.mevProtectTx,
         },
-        "Selling wPKN (no buy path)"
+        "Broadcasting sell via MEV-protected RPC"
       );
 
-      const tx = await router.swapExactTokensForTokens(
-        params.amountWpkn,
-        amountOutMin,
-        path,
-        signer.address,
-        deadline
-      );
+      const tx = await router.swapExactTokensForTokens(...swapArgs, {
+        gasLimit: (gasEstimate * 120n) / 100n,
+        gasPrice: gas.gasPriceWei,
+      });
       const receipt = await tx.wait();
       this.lastActionAt = Date.now() / 1000;
       return receipt!.hash as string;

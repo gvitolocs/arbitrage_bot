@@ -1,9 +1,14 @@
 import "dotenv/config";
 import { getAddress, isAddress } from "ethers";
+import { BSC_FREE_MEV_TX_RPCS } from "./blockchain/mev.js";
 import type { PoolConfig } from "./types.js";
 
 export interface BotConfig {
   rpcUrls: string[];
+  /** Private / MEV-protected endpoints — used only to broadcast transactions. */
+  txRpcUrls: string[];
+  mevProtectTx: boolean;
+  txJitterMs: number;
   chainId: number;
   privateKey: string | undefined;
   botWalletAddress: string | undefined;
@@ -68,6 +73,14 @@ function parseTokenAmount(value: string | undefined, defaultStr: string, decimal
   const [whole, frac = ""] = v.split(".");
   const fracPadded = frac.padEnd(decimals, "0").slice(0, decimals);
   return BigInt(whole) * 10n ** BigInt(decimals) + BigInt(fracPadded || "0");
+}
+
+function hostOf(url: string): string {
+  try {
+    return new URL(url).host;
+  } catch {
+    return url;
+  }
 }
 
 function parseRpcUrls(raw: string | undefined): string[] {
@@ -135,6 +148,18 @@ export function loadConfig(): BotConfig {
   const enableAutoLiquidity = parseBool(process.env.ENABLE_AUTO_LIQUIDITY, false);
   const sellOnlyWpkn = parseBool(process.env.SELL_ONLY_WPKN, true);
   const dryRun = parseBool(process.env.DRY_RUN, true);
+  const mevProtectTx = parseBool(process.env.MEV_PROTECT_TX, true);
+
+  const txRpcRaw = process.env.TX_RPC_URLS?.trim();
+  let txRpcUrls = txRpcRaw
+    ? txRpcRaw.split(",").map((u) => u.trim()).filter(Boolean)
+    : [];
+  if (mevProtectTx && txRpcUrls.length === 0) {
+    txRpcUrls = [...BSC_FREE_MEV_TX_RPCS];
+  }
+  if (enableTrading && mevProtectTx && txRpcUrls.length === 0) {
+    throw new Error("TX_RPC_URLS required when MEV_PROTECT_TX=true and trading enabled");
+  }
 
   if ((enableTrading || enableAutoLiquidity) && dryRun) {
     throw new Error("Cannot enable trading/liquidity while DRY_RUN=true");
@@ -145,9 +170,21 @@ export function loadConfig(): BotConfig {
   if (enableAutoLiquidity && sellOnlyWpkn) {
     throw new Error("ENABLE_AUTO_LIQUIDITY conflicts with SELL_ONLY_WPKN");
   }
+  if (enableTrading && mevProtectTx) {
+    const publicHosts = new Set(parseRpcUrls(process.env.RPC_URLS).map(hostOf));
+    const overlap = txRpcUrls.filter((u) => publicHosts.has(hostOf(u)));
+    if (overlap.length === txRpcUrls.length && txRpcUrls.length > 0) {
+      throw new Error(
+        "TX_RPC_URLS must use private MEV RPCs (e.g. bscrpc.pancakeswap.finance), not only public seeds"
+      );
+    }
+  }
 
   const config: BotConfig = {
     rpcUrls: parseRpcUrls(process.env.RPC_URLS),
+    txRpcUrls: txRpcUrls.length > 0 ? txRpcUrls : parseRpcUrls(process.env.RPC_URLS),
+    mevProtectTx,
+    txJitterMs: Number(process.env.TX_JITTER_MS ?? "3000"),
     chainId: Number(process.env.CHAIN_ID ?? "56"),
     privateKey,
     botWalletAddress: botWallet,
@@ -208,6 +245,8 @@ export function formatConfigSummary(config: BotConfig): string {
     `enableTrading=${config.enableTrading}`,
     `enableAutoLiquidity=${config.enableAutoLiquidity}`,
     `sellOnly=${config.sellOnlyWpkn}`,
+    `mevTx=${config.mevProtectTx}`,
+    `txRpcs=${config.txRpcUrls.length}`,
     `pools=${config.pools.map((p) => p.name).join(", ")}`,
     `pollInterval=${config.pollIntervalSeconds}s`,
   ].join(" | ");

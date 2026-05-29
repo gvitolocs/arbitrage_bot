@@ -1,5 +1,7 @@
 import type { BotConfig } from "../config.js";
+import type { PoolReader } from "../blockchain/contracts.js";
 import { SwapExecutor } from "../blockchain/executor.js";
+import { getPoolFee } from "./poolMonitor.js";
 import { formatUnits, percentDifference } from "../dex/uniswapV2Math.js";
 import type { BotDatabase } from "../db/index.js";
 import type { GeckoPoolSnapshot } from "./geckoTerminal.js";
@@ -17,6 +19,7 @@ export interface SellRebalancePlan {
 export class SellRebalancer {
   constructor(
     private readonly config: BotConfig,
+    private readonly poolReader: PoolReader,
     private readonly executor: SwapExecutor,
     private readonly db: BotDatabase
   ) {}
@@ -93,16 +96,22 @@ export class SellRebalancer {
       throw new Error("Daily wPKN sell limit reached");
     }
 
-    const feeBps =
-      this.config.pools.find((p) => p.address === reserves.poolAddress)?.feeBps ??
-      this.config.defaultPoolFeeBps;
+    const poolCfg = this.config.pools.find(
+      (p) => p.address.toLowerCase() === reserves.poolAddress.toLowerCase()
+    );
+    if (!poolCfg || poolCfg.kind !== "v2") {
+      throw new Error("Sell execution only supported on V2 pools");
+    }
+
+    const fresh = await this.poolReader.readPoolReserves(poolCfg);
+    const feeBps = getPoolFee(this.config, poolCfg);
 
     const hash = await this.executor.sellWpknForQuote({
       amountWpkn: plan.amountWpkn,
-      reserveWpkn: reserves.wpknReserve,
-      reserveQuote: reserves.quoteReserve,
+      reserveWpkn: fresh.wpknReserve,
+      reserveQuote: fresh.quoteReserve,
       feeBps,
-      quoteTokenAddress: reserves.quoteToken.address,
+      quoteTokenAddress: fresh.quoteToken.address,
     });
 
     this.db.addDailyUsage(today, plan.amountWpkn, 0n);

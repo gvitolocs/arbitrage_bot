@@ -41,6 +41,10 @@ flowchart LR
   Exec[Transaction executor] -.->|milestone 2| RPC
 ```
 
+## MEV (free on BSC)
+
+Swaps broadcast via **private RPCs** (`TX_RPC_URLS`: PancakeSwap MEV Guard, 48club, Merkle). Reserves use public `RPC_URLS`. Preflight `staticCall`, fresh reserves, slippage min, tx jitter. Not perfect on micro-liquidity pools — see [SECURITY.md](./SECURITY.md).
+
 ## Technical highlights
 
 - **Correct reserve mapping** — reads `token0` / `token1` from the pair; never assumes wPKN is `token0`.

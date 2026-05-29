@@ -49,6 +49,19 @@ Before any on-chain transaction:
 - Default: approve exact amount per refill/swap.
 - `UNLIMITED_APPROVAL=true` only if you accept elevated rug/drain risk.
 
+## MEV protection (free, BNB Chain)
+
+When `MEV_PROTECT_TX=true` (default), **transactions** use private builder RPCs
+(PancakeSwap, 48club, Merkle — see [BNB Chain MEV user guide](https://docs.bnbchain.org/bnb-smart-chain/validator/mev/user-guide/)).
+**Reads** still use public `RPC_URLS`.
+
+Also enabled: pre-send `staticCall`, fresh reserves before sell, slippage min output,
+tx jitter, shorter deadline (120s).
+
+This reduces sandwich/frontrun risk but is **not 100%** (builder policy changes, large trades on thin pools).
+
+Set `MEV_PROTECT_TX=false` only if you accept public-mempool exposure.
+
 ## Known limitations (v0.1)
 
 - **Live transaction execution is not implemented.** Monitoring and simulation only.

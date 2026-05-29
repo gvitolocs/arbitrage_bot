@@ -26,7 +26,7 @@ async function main(): Promise<void> {
   const arbitrage = new ArbitrageSimulator(config, providerManager, db);
   const guardian = new LiquidityGuardian(config, poolReader, providerManager, db);
   const swapExecutor = new SwapExecutor(config, providerManager);
-  const sellRebalancer = new SellRebalancer(config, swapExecutor, db);
+  const sellRebalancer = new SellRebalancer(config, poolReader, swapExecutor, db);
 
   const healthServer = createServer((req, res) => {
     if (req.url === "/health" || req.url === "/healthz") {
@@ -38,6 +38,7 @@ async function main(): Promise<void> {
           enableTrading: config.enableTrading,
           enableAutoLiquidity: config.enableAutoLiquidity,
           sellOnlyWpkn: config.sellOnlyWpkn,
+          mevProtectTx: config.mevProtectTx,
         })
       );
       return;
